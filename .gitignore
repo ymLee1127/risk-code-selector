@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv/
+venv/
+env/
+
+# Storage (DB, 선택 결과)
+storage/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Excel (선택)
+*.xlsx
+!risk_code_master.xlsx
