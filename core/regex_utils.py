@@ -2,7 +2,7 @@
 import re
 from typing import List, Optional
 
-DEFAULT_POS_REGEX_TEMPLATE = r"{keyword}(포함|은포함|발생|발생율)?"
+DEFAULT_POS_REGEX_TEMPLATE = r"{keyword}(포함|은포함|발생|발생율|발생률률)?"
 DEFAULT_NEG_REGEX_TEMPLATE = (
     r"{keyword}.{{0,4}}(제외|아님|미포함|불포함|비대상)|{keyword}제외|{keyword}아님"
 )

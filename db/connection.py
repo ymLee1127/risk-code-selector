@@ -54,3 +54,50 @@ def load_risk_codes_from_db(
     query = text(f'SELECT "{code_col}" AS CODE, "{nm_col}" AS NM FROM "{table}"')
     df = pd.read_sql(query, engine)
     return df
+
+
+def import_risk_codes_to_db(
+    df: pd.DataFrame,
+    table: Optional[str] = None,
+    mode: str = "replace",
+) -> tuple[int, str]:
+    """
+    DataFrame을 risk_code_master 테이블에 반영.
+    df는 CODE, NM 컬럼을 가져야 함.
+    mode: "replace" (전체 교체) | "append" (추가, 중복 시 무시)
+    반환: (반영된 행 수, 메시지)
+    """
+    from sqlalchemy import text
+
+    table = table or settings.DB_RISK_CODE_TABLE
+    if "CODE" not in df.columns or "NM" not in df.columns:
+        raise ValueError("DataFrame에 CODE, NM 컬럼이 필요합니다.")
+
+    engine = get_connection()
+    df_clean = df[["CODE", "NM"]].dropna(subset=["CODE"]).astype(str)
+    df_clean = df_clean.drop_duplicates(subset=["CODE"], keep="first")
+
+    with engine.connect() as conn:
+        conn.execute(text(f"""
+            CREATE TABLE IF NOT EXISTS "{table}" (
+                CODE VARCHAR(50) PRIMARY KEY,
+                NM VARCHAR(500)
+            )
+        """))
+        conn.commit()
+
+        if mode == "replace":
+            conn.execute(text(f'DELETE FROM "{table}"'))
+            conn.commit()
+
+        inserted = 0
+        for _, row in df_clean.iterrows():
+            result = conn.execute(
+                text(f'INSERT OR IGNORE INTO "{table}" (CODE, NM) VALUES (:code, :nm)'),
+                {"code": str(row["CODE"])[:50], "nm": str(row["NM"])[:500]},
+            )
+            if result.rowcount and result.rowcount > 0:
+                inserted += 1
+        conn.commit()
+
+    return inserted, f"{inserted}건 반영 완료 (총 {len(df_clean)}건 중)"

@@ -33,13 +33,13 @@ from db.connection import test_connection
 # =========================
 def init_regex_state():
     if "keyword" not in st.session_state:
-        st.session_state.keyword = settings.DEFAULT_KEYWORD
+        st.session_state.keyword = ""  # 최초: 빈값 (초기화 상태)
     if "last_keyword_for_regex" not in st.session_state:
-        st.session_state.last_keyword_for_regex = settings.DEFAULT_KEYWORD
+        st.session_state.last_keyword_for_regex = ""
     if "pos_regex" not in st.session_state:
-        st.session_state.pos_regex = build_pos_regex(settings.DEFAULT_KEYWORD)
+        st.session_state.pos_regex = ""
     if "neg_regex" not in st.session_state:
-        st.session_state.neg_regex = build_neg_regex(settings.DEFAULT_KEYWORD)
+        st.session_state.neg_regex = ""
     if "extra_pos_patterns_text" not in st.session_state:
         st.session_state.extra_pos_patterns_text = ""
     if "extra_neg_patterns_text" not in st.session_state:
@@ -79,9 +79,26 @@ def refresh_saved_selection_state():
         st.session_state.selected_saved_name = ""
 
 
+def reset_filter_state():
+    """필터 관련 상태 리셋 (최종선택은 유지)"""
+    st.session_state.pos_regex = ""
+    st.session_state.neg_regex = ""
+    st.session_state.extra_pos_patterns_text = ""
+    st.session_state.extra_neg_patterns_text = ""
+    st.session_state.last_keyword_for_regex = ""
+    st.session_state.top_filter = "전체"
+    st.session_state.current_page = 1
+
+
 def sync_regex_with_keyword():
     current_keyword = st.session_state.keyword.strip()
     last_keyword = st.session_state.last_keyword_for_regex.strip()
+
+    if not current_keyword:
+        # 키워드 비우고 Enter → 필터 리셋 (최종선택 유지)
+        reset_filter_state()
+        return
+
     if current_keyword != last_keyword:
         st.session_state.pos_regex = build_pos_regex(current_keyword)
         st.session_state.neg_regex = build_neg_regex(current_keyword)
@@ -90,12 +107,12 @@ def sync_regex_with_keyword():
 
 
 def init_selection_state(df_filtered: pd.DataFrame):
+    """데이터 로드 시 선택 상태 초기화. 최초 로딩 시에는 아무것도 선택되지 않은 상태."""
     current_codes = set(df_filtered["CODE"].astype(str).tolist())
     last_codes = st.session_state.last_loaded_codes
     new_codes = current_codes - last_codes
     for code in new_codes:
-        row = df_filtered.loc[df_filtered["CODE"] == code].iloc[0]
-        st.session_state.selection_map[code] = bool(row["추천포함"])
+        st.session_state.selection_map[code] = False  # 최초 로딩 시 선택 없음
     st.session_state.last_loaded_codes = current_codes
 
 
@@ -115,14 +132,15 @@ def ensure_page_in_range(page: int, total_pages: int) -> int:
     return max(1, min(page, total_pages))
 
 
-def load_saved_selection_into_map(selected_name: str, filtered_df: pd.DataFrame):
+def load_saved_selection_into_map(selected_name: str, df: pd.DataFrame):
+    """저장된 선택을 selection_map에 반영. df는 전체 데이터(필터 전)를 사용해 모든 코드에 적용."""
     saved_items = load_saved_selection_sets()
     target = next((item for item in saved_items if item.get("name") == selected_name), None)
     if target is None:
         raise ValueError("선택한 저장 항목을 찾을 수 없습니다.")
     saved_codes = set(str(c) for c in target.get("codes", []))
-    valid_codes = set(filtered_df["CODE"].astype(str).tolist())
-    for code in valid_codes:
+    all_codes = set(df["CODE"].astype(str).tolist())
+    for code in all_codes:
         st.session_state.selection_map[code] = code in saved_codes
 
 
@@ -189,6 +207,11 @@ def run_streamlit_app() -> None:
     st.caption("정규식 1차 필터 + 페이지 검토 + 체크박스 최종 선택")
 
     with st.sidebar:
+        if st.button("📋 저장 결과 목록", use_container_width=True):
+            st.switch_page("pages/1_saved_results.py")
+        if st.button("📥 엑셀 → DB Import", use_container_width=True):
+            st.switch_page("pages/2_excel_to_db.py")
+        st.divider()
         st.header("데이터 소스")
 
         source_type = st.radio(
@@ -222,7 +245,12 @@ def run_streamlit_app() -> None:
         st.divider()
         st.header("1차 필터 설정")
 
-        st.text_input("키워드", key="keyword", on_change=sync_regex_with_keyword)
+        st.text_input(
+            "키워드",
+            key="keyword",
+            on_change=sync_regex_with_keyword,
+            placeholder="예: 치아파절 (입력 후 Enter)",
+        )
 
         st.markdown("**기본 긍정 정규식**")
         st.text_area("긍정 패턴", key="pos_regex", height=90)
@@ -302,6 +330,17 @@ def run_streamlit_app() -> None:
 
     init_selection_state(filtered)
 
+    # 저장결과 목록 페이지에서 "코드 선택기로 이동" 클릭 시 불러오기
+    load_from_page = st.session_state.pop("load_from_saved_page", None)
+    if load_from_page:
+        try:
+            load_saved_selection_into_map(load_from_page, df)
+            set_top_filter("최종선택")
+            st.session_state.selected_saved_name = load_from_page
+            st.toast(f"'{load_from_page}' 불러오기 완료")
+        except Exception as e:
+            st.error(f"불러오기 실패: {e}")
+
     # 상단 요약
     m1, m2, m3, m4 = st.columns(4)
     with m1:
@@ -310,12 +349,16 @@ def run_streamlit_app() -> None:
             set_top_filter("전체")
             st.rerun()
     with m2:
-        st.metric("추천 포함", int(filtered["추천포함"].sum()))
+        # 키워드 없으면 초기화 상태 (추천/부정 없음). 키워드 입력 후 Enter 시 추천/부정 표시
+        is_init_state = not st.session_state.keyword.strip()
+        reco_count = 0 if is_init_state else int(filtered["추천포함"].sum())
+        st.metric("추천 포함", reco_count)
         if st.button("추천 포함만 보기", key="btn_reco", use_container_width=True):
             set_top_filter("추천포함")
             st.rerun()
     with m3:
-        st.metric("부정 패턴", int(filtered["neg_match"].sum()))
+        neg_count = 0 if is_init_state else int(filtered["neg_match"].sum())
+        st.metric("부정 패턴", neg_count)
         if st.button("부정 패턴만 보기", key="btn_neg", use_container_width=True):
             set_top_filter("부정패턴")
             st.rerun()
@@ -432,16 +475,32 @@ def run_streamlit_app() -> None:
             st.session_state.selection_map[code] = checked
             cols[1].write(code)
             cols[2].write(row["NM"])
-            cols[3].write("Y" if row["추천포함"] else "")
-            cols[4].write("Y" if row["neg_match"] else "")
-            cols[5].write(row["판단근거"])
+            # 초기화 상태(전체)에서는 추천/부정/판단근거 표기 없음
+            if is_init_state:
+                cols[3].write("")
+                cols[4].write("")
+                cols[5].write("")
+            else:
+                cols[3].write("Y" if row["추천포함"] else "")
+                cols[4].write("Y" if row["neg_match"] else "")
+                cols[5].write(row["판단근거"])
 
     with right:
         st.subheader("최종 선택 결과")
         selected_codes = [k for k, v in st.session_state.selection_map.items() if v]
-        result_df = filtered[filtered["CODE"].isin(selected_codes)][
+        # filtered에 있는 선택 코드 + filtered에 없지만 df에 있는 선택 코드 (불러오기 시 전체 반영)
+        in_filtered = filtered[filtered["CODE"].isin(selected_codes)][
             ["CODE", "NM", "추천포함", "판단근거"]
         ].copy()
+        missing_codes = set(selected_codes) - set(filtered["CODE"].astype(str))
+        if missing_codes:
+            missing_df = df[df["CODE"].astype(str).isin(missing_codes)].copy()
+            missing_df = missing_df[["CODE", "NM"]].copy()
+            missing_df["추천포함"] = False
+            missing_df["판단근거"] = "필터범위외"
+            result_df = pd.concat([in_filtered, missing_df], ignore_index=True)
+        else:
+            result_df = in_filtered
         result_df = result_df.sort_values(["추천포함", "CODE"], ascending=[False, True])
 
         st.dataframe(result_df, use_container_width=True, height=420)
@@ -506,7 +565,8 @@ def run_streamlit_app() -> None:
                 )
             if st.button("불러오기", use_container_width=True):
                 try:
-                    load_saved_selection_into_map(selected_saved_name, filtered)
+                    load_saved_selection_into_map(selected_saved_name, df)
+                    set_top_filter("최종선택")  # 불러온 결과를 목록/최종선택에 바로 반영
                     st.success(f"'{selected_saved_name}' 불러오기 완료")
                     st.rerun()
                 except Exception as e:
