@@ -25,7 +25,7 @@ FALLBACK_SAMPLE = pd.DataFrame({
 # 상품 기본 샘플
 FALLBACK_PRODUCT = pd.DataFrame({
     "외부번호": ["P001", "P002", "P003"],
-    "상품코드": ["PRD-A", "PRD-B", "PRD-C"],
+    "상품코드RD": ["PRD-A", "PRD-B", "PRD-C"],
     "파라미터보험기간": ["10", "20", "10"],
     "파라미터납입주기": ["월납", "년납", "월납"],
     "이전상품코드": ["", "PRD-A", ""],
@@ -134,7 +134,11 @@ def load_by_entity(entity_type: str, source: str = "default", **kwargs) -> pd.Da
             table_override = kwargs.get("table")
             tbl = table_override if table_override else table
             display_cols = config.get("display_cols", [])
-            df = load_from_table(tbl, columns=display_cols if display_cols else None)
+            df = load_from_table(tbl, columns=None)
+            aliases = config.get("db_column_aliases", {})
+            for old_name, new_name in aliases.items():
+                if old_name in df.columns and new_name not in df.columns:
+                    df = df.rename(columns={old_name: new_name})
             return df
         except Exception:
             return _get_fallback(entity_type)

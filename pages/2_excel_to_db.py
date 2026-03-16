@@ -66,12 +66,15 @@ if input_mode == "텍스트 붙여넣기 (엑셀에서 복사)":
     st.markdown("- 첫 줄이 헤더(컬럼명)인 경우 자동 인식됩니다.")
     st.markdown("- 탭 또는 쉼표로 구분된 텍스트를 지원합니다.")
     has_header = st.checkbox("첫 줄이 헤더(컬럼명)입니다", value=True, key="has_header")
+    # 100만 라인 지원: 라인당 ~500자 가정 → 5억 자
     pasted_text = st.text_area(
         "데이터 붙여넣기",
         placeholder="예시:\nCODE\tNM\nK001\t코드이름1\nK002\t코드이름2" if entity_type == "위험률" else f"예시:\n{code_col}\t{name_col}\t...\n값1\t값2\t...",
-        height=200,
+        height=500,
+        max_chars=500_000_000,
         key="pasted_csv",
     )
+    st.caption("💡 최대 약 100만 라인까지 붙여넣기 가능. 매우 큰 데이터는 '엑셀 파일 업로드'를 권장합니다.")
     if not pasted_text.strip():
         st.info("엑셀에서 복사한 데이터를 위 입력창에 붙여넣어 주세요.")
         if st.button("코드 선택기로 이동"):

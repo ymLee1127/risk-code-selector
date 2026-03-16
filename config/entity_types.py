@@ -28,7 +28,7 @@ ENTITY_TYPES = {
         "required_cols": {"CODE", "NM"},
     },
     "상품": {
-        "code_col": "상품코드",
+        "code_col": "상품코드RD",
         "name_col": "상품명",
         "search_mode": "keyword_combo",
         "search_cols": ["상품명", "파라미터보험기간코드", "파라미터납입주기코드", "파라미터상품유형코드","상품코드RD"],
@@ -67,7 +67,8 @@ ENTITY_TYPES = {
         ],
         "table": "product_master",
         "excel_path": str(PROJECT_ROOT / "product_master.xlsx"),
-        "required_cols": {"상품코드", "상품명"},
+        "required_cols": {"상품코드RD", "상품명"},
+        "db_column_aliases": {"상품코드": "상품코드RD", "상품명칭": "상품명"},
     },
     "담보": {
         "code_col": "담보코드RD",
@@ -120,6 +121,7 @@ ENTITY_TYPES = {
         "table": "coverage_master",
         "excel_path": str(PROJECT_ROOT / "coverage_master.xlsx"),
         "required_cols": {"담보코드RD", "보험명"},
+        "db_column_aliases": {"보험코드": "담보코드RD"},
     },
 }
 
