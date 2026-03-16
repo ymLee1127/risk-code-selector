@@ -1,9 +1,42 @@
-"""필터링 로직"""
+"""필터링 로직 (위험률 정규식 + 공통)"""
 import re
 
 import pandas as pd
 
 from core.regex_utils import compile_regex, normalize_text
+
+
+def apply_filter(
+    df: pd.DataFrame,
+    entity_type: str,
+    keyword: str = "",
+    pos_regex: str = "",
+    neg_regex: str = "",
+    param_filters: dict | None = None,
+) -> pd.DataFrame:
+    """엔티티 타입에 따라 적절한 필터 적용"""
+    from config.entity_types import get_entity_config, get_search_mode
+
+    config = get_entity_config(entity_type)
+    mode = get_search_mode(entity_type)
+
+    if mode == "regex":
+        # 위험률: CODE, NM 표준화 후 first_pass_filter
+        df_std = df.copy()
+        code_col = config["code_col"]
+        name_col = config["name_col"]
+        if code_col not in df_std.columns or name_col not in df_std.columns:
+            raise ValueError(f"필수 컬럼 누락: {code_col}, {name_col}")
+        df_std["CODE"] = df_std[code_col].astype(str)
+        df_std["NM"] = df_std[name_col].astype(str)
+        result = first_pass_filter(df_std, keyword, pos_regex, neg_regex)
+        result[code_col] = result["CODE"]
+        result[name_col] = result["NM"]
+        return result
+
+    from core.filter_keyword_combo import filter_keyword_combo
+
+    return filter_keyword_combo(df, config, keyword, param_filters)
 
 
 def build_reason(row: pd.Series) -> str:

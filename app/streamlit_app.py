@@ -13,14 +13,19 @@ from core.regex_utils import (
     evaluate_text,
     merge_regex_patterns,
 )
-from core.filter import first_pass_filter, paginate_df
+from config.entity_types import ENTITY_TYPES, get_entity_config
+from core.filter import apply_filter, paginate_df
 from core.selection import (
     build_to_query_string,
+    find_saved_item,
     load_saved_selection_sets,
     upsert_selection_set,
 )
 from data.loaders import (
+    FALLBACK_COVERAGE,
+    FALLBACK_PRODUCT,
     FALLBACK_SAMPLE,
+    load_by_entity,
     load_default_data,
     load_from_db,
     load_from_uploaded_file,
@@ -32,6 +37,8 @@ from db.connection import test_connection
 # session_state
 # =========================
 def init_regex_state():
+    if "entity_type" not in st.session_state:
+        st.session_state.entity_type = "위험률"
     if "keyword" not in st.session_state:
         st.session_state.keyword = ""  # 최초: 빈값 (초기화 상태)
     if "last_keyword_for_regex" not in st.session_state:
@@ -58,8 +65,11 @@ def init_regex_state():
         st.session_state.save_name = ""
     if "save_description" not in st.session_state:
         st.session_state.save_description = ""
+    if "param_filters" not in st.session_state:
+        st.session_state.param_filters = {}
 
-    saved_items = load_saved_selection_sets()
+    entity_type = st.session_state.get("entity_type", "위험률")
+    saved_items = load_saved_selection_sets(entity_type=entity_type)
     if "saved_selection_names" not in st.session_state:
         st.session_state.saved_selection_names = [item.get("name", "") for item in saved_items]
     if "selected_saved_name" not in st.session_state:
@@ -69,7 +79,8 @@ def init_regex_state():
 
 
 def refresh_saved_selection_state():
-    saved_items = load_saved_selection_sets()
+    entity_type = st.session_state.get("entity_type", "위험률")
+    saved_items = load_saved_selection_sets(entity_type=entity_type)
     names = [item.get("name", "") for item in saved_items]
     st.session_state.saved_selection_names = names
     if names:
@@ -132,14 +143,22 @@ def ensure_page_in_range(page: int, total_pages: int) -> int:
     return max(1, min(page, total_pages))
 
 
-def load_saved_selection_into_map(selected_name: str, df: pd.DataFrame):
+def load_saved_selection_into_map(
+    selected_name: str,
+    df: pd.DataFrame,
+    entity_type: str | None = None,
+):
     """저장된 선택을 selection_map에 반영. df는 전체 데이터(필터 전)를 사용해 모든 코드에 적용."""
-    saved_items = load_saved_selection_sets()
-    target = next((item for item in saved_items if item.get("name") == selected_name), None)
+    target = find_saved_item(selected_name, entity_type)
     if target is None:
         raise ValueError("선택한 저장 항목을 찾을 수 없습니다.")
+    cfg = get_entity_config(entity_type or "위험률")
+    code_col = cfg["code_col"]
+    if "CODE" in df.columns:
+        all_codes = set(df["CODE"].astype(str).tolist())
+    else:
+        all_codes = set(df[code_col].astype(str).tolist()) if code_col in df.columns else set()
     saved_codes = set(str(c) for c in target.get("codes", []))
-    all_codes = set(df["CODE"].astype(str).tolist())
     for code in all_codes:
         st.session_state.selection_map[code] = code in saved_codes
 
@@ -199,12 +218,23 @@ def to_query_dialog(query_text: str):
 # Main App
 # =========================
 def run_streamlit_app() -> None:
-    st.set_page_config(page_title="위험률 코드 선택기", layout="wide")
+    st.set_page_config(page_title="코드 선택기", layout="wide")
     init_regex_state()
     refresh_saved_selection_state()
 
-    st.title("위험률 코드 선택기")
-    st.caption("정규식 1차 필터 + 페이지 검토 + 체크박스 최종 선택")
+    st.title("코드 선택기")
+    entity_type = st.radio(
+        "엔티티 타입",
+        options=list(ENTITY_TYPES.keys()),
+        index=list(ENTITY_TYPES.keys()).index(st.session_state.entity_type),
+        horizontal=True,
+        key="entity_type_radio",
+    )
+    st.session_state.entity_type = entity_type
+
+    st.caption(
+        "위험률: 정규식 필터 | 상품/담보: 키워드+파라미터 검색"
+    )
 
     with st.sidebar:
         if st.button("📋 저장 결과 목록", use_container_width=True):
@@ -213,6 +243,11 @@ def run_streamlit_app() -> None:
             st.switch_page("pages/2_excel_to_db.py")
         st.divider()
         st.header("데이터 소스")
+
+        entity_cfg = get_entity_config(entity_type)
+        default_table = entity_cfg.get("table", settings.DB_RISK_CODE_TABLE)
+        default_code_col = entity_cfg.get("code_col", settings.DB_CODE_COLUMN)
+        default_nm_col = entity_cfg.get("name_col", settings.DB_NM_COLUMN)
 
         source_type = st.radio(
             "불러오기 방식",
@@ -226,53 +261,66 @@ def run_streamlit_app() -> None:
         db_nm_col = None
 
         if source_type == "기본 엑셀 파일":
-            st.write(f"기본 경로: `{settings.DEFAULT_EXCEL_PATH}`")
+            excel_path = entity_cfg.get("excel_path", settings.DEFAULT_EXCEL_PATH)
+            st.write(f"기본 경로: `{excel_path}`")
             st.caption("해당 파일이 있으면 자동으로 읽고, 없으면 샘플 데이터를 사용합니다.")
         elif source_type == "파일 업로드":
             uploaded = st.file_uploader("CSV 또는 Excel 업로드", type=["csv", "xlsx"])
         else:
-            # DB 연결
             ok, msg = test_connection()
             if ok:
                 st.success(f"DB 연결: {msg}")
             else:
                 st.error(f"DB 연결 실패: {msg}")
             st.caption(f"URL: `{settings.DATABASE_URL[:50]}...`" if len(settings.DATABASE_URL) > 50 else f"URL: `{settings.DATABASE_URL}`")
-            db_table = st.text_input("테이블명", value=settings.DB_RISK_CODE_TABLE, key="db_table")
-            db_code_col = st.text_input("CODE 컬럼", value=settings.DB_CODE_COLUMN, key="db_code_col")
-            db_nm_col = st.text_input("NM 컬럼", value=settings.DB_NM_COLUMN, key="db_nm_col")
+            db_table = st.text_input("테이블명", value=default_table, key="db_table")
+            db_code_col = st.text_input("CODE 컬럼", value=default_code_col, key="db_code_col")
+            db_nm_col = st.text_input("NM 컬럼", value=default_nm_col, key="db_nm_col")
 
         st.divider()
         st.header("1차 필터 설정")
 
+        keyword_placeholder = (
+            "예: 치아파절 (입력 후 Enter)" if entity_type == "위험률"
+            else "예: 치아 (상품명/보험명 검색)"
+        )
         st.text_input(
             "키워드",
             key="keyword",
             on_change=sync_regex_with_keyword,
-            placeholder="예: 치아파절 (입력 후 Enter)",
+            placeholder=keyword_placeholder,
         )
 
-        st.markdown("**기본 긍정 정규식**")
-        st.text_area("긍정 패턴", key="pos_regex", height=90)
+        if entity_type == "위험률":
+            st.markdown("**기본 긍정 정규식**")
+            st.text_area("긍정 패턴", key="pos_regex", height=90)
 
-        st.markdown("**추가 긍정 패턴**")
-        st.text_area(
-            "추가 긍정 패턴(줄바꿈으로 여러 개 입력)",
-            key="extra_pos_patterns_text",
-            height=100,
-            help="한 줄에 하나씩 입력하세요. 예: 영구치파절",
-        )
+            st.markdown("**추가 긍정 패턴**")
+            st.text_area(
+                "추가 긍정 패턴(줄바꿈으로 여러 개 입력)",
+                key="extra_pos_patterns_text",
+                height=100,
+                help="한 줄에 하나씩 입력하세요. 예: 영구치파절",
+            )
 
-        st.markdown("**기본 부정 정규식**")
-        st.text_area("부정 패턴", key="neg_regex", height=110)
+            st.markdown("**기본 부정 정규식**")
+            st.text_area("부정 패턴", key="neg_regex", height=110)
 
-        st.markdown("**추가 부정 패턴**")
-        st.text_area(
-            "추가 부정 패턴(줄바꿈으로 여러 개 입력)",
-            key="extra_neg_patterns_text",
-            height=120,
-            help="한 줄에 하나씩 입력하세요. 예: 대장용종.{0,4}제외",
-        )
+            st.markdown("**추가 부정 패턴**")
+            st.text_area(
+                "추가 부정 패턴(줄바꿈으로 여러 개 입력)",
+                key="extra_neg_patterns_text",
+                height=120,
+                help="한 줄에 하나씩 입력하세요. 예: 대장용종.{0,4}제외",
+            )
+        else:
+            param_cols = entity_cfg.get("param_cols", [])
+            param_filters = {}
+            for col in param_cols:
+                val = st.text_input(f"{col}", value="", key=f"param_{entity_type}_{col}", placeholder="전체")
+                if val.strip():
+                    param_filters[col] = val.strip()
+            st.session_state.param_filters = param_filters
 
         st.divider()
         st.header("보기 옵션")
@@ -283,7 +331,7 @@ def run_streamlit_app() -> None:
 
         btn_col1, btn_col2 = st.columns(2)
         with btn_col1:
-            open_pattern_test = st.button("패턴 테스트", use_container_width=True)
+            open_pattern_test = st.button("패턴 테스트", use_container_width=True) if entity_type == "위험률" else None
         with btn_col2:
             if st.button("상단 필터 해제", use_container_width=True):
                 set_top_filter("전체")
@@ -295,31 +343,62 @@ def run_streamlit_app() -> None:
     final_pos_regex = merge_regex_patterns(st.session_state.pos_regex, extra_pos_patterns)
     final_neg_regex = merge_regex_patterns(st.session_state.neg_regex, extra_neg_patterns)
 
-    if open_pattern_test:
+    if open_pattern_test and entity_type == "위험률":
         pattern_test_dialog(final_pos_regex, final_neg_regex)
 
     # 데이터 로드
+    entity_cfg = get_entity_config(entity_type)
+    default_table = entity_cfg.get("table", settings.DB_RISK_CODE_TABLE)
     try:
         if source_type == "기본 엑셀 파일":
-            df = load_default_data()
+            df = load_by_entity(entity_type, source="default")
         elif source_type == "파일 업로드":
             if uploaded is None:
                 st.info("업로드 파일이 없어서 샘플 데이터를 사용합니다.")
-                df = FALLBACK_SAMPLE.copy()
+                df = (
+                    FALLBACK_SAMPLE.copy()
+                    if entity_type == "위험률"
+                    else (FALLBACK_PRODUCT.copy() if entity_type == "상품" else FALLBACK_COVERAGE.copy())
+                )
             else:
-                df = load_from_uploaded_file(uploaded.name, uploaded.getvalue())
+                df = load_by_entity(
+                    entity_type,
+                    source="upload",
+                    file_name=uploaded.name,
+                    file_bytes=uploaded.getvalue(),
+                )
         else:
-            df = load_from_db(
-                table=db_table or settings.DB_RISK_CODE_TABLE,
-                code_col=db_code_col or settings.DB_CODE_COLUMN,
-                nm_col=db_nm_col or settings.DB_NM_COLUMN,
-            )
+            try:
+                df = load_by_entity(
+                    entity_type,
+                    source="db",
+                    table=db_table or default_table,
+                )
+            except Exception:
+                if entity_type == "위험률":
+                    try:
+                        df = load_from_db(
+                            table=db_table or settings.DB_RISK_CODE_TABLE,
+                            code_col=db_code_col or settings.DB_CODE_COLUMN,
+                            nm_col=db_nm_col or settings.DB_NM_COLUMN,
+                        )
+                    except Exception:
+                        df = FALLBACK_SAMPLE.copy()
+                else:
+                    df = (
+                        FALLBACK_PRODUCT.copy()
+                        if entity_type == "상품"
+                        else FALLBACK_COVERAGE.copy()
+                    )
 
-        filtered = first_pass_filter(
+        param_filters = st.session_state.get("param_filters", {}) if entity_type != "위험률" else None
+        filtered = apply_filter(
             df,
-            st.session_state.keyword,
-            final_pos_regex,
-            final_neg_regex,
+            entity_type,
+            keyword=st.session_state.keyword,
+            pos_regex=final_pos_regex,
+            neg_regex=final_neg_regex,
+            param_filters=param_filters,
         )
     except re.error as e:
         st.error(f"정규식 오류: {e}")
@@ -332,12 +411,17 @@ def run_streamlit_app() -> None:
 
     # 저장결과 목록 페이지에서 "코드 선택기로 이동" 클릭 시 불러오기
     load_from_page = st.session_state.pop("load_from_saved_page", None)
+    load_from_entity = st.session_state.pop("load_from_saved_entity_type", None)
     if load_from_page:
         try:
-            load_saved_selection_into_map(load_from_page, df)
+            name = load_from_page if isinstance(load_from_page, str) else load_from_page.get("name", "")
+            ent = load_from_entity or (load_from_page.get("entity_type", "위험률") if isinstance(load_from_page, dict) else "위험률")
+            if ent:
+                st.session_state.entity_type = ent
+            load_saved_selection_into_map(name, df, entity_type=ent)
             set_top_filter("최종선택")
-            st.session_state.selected_saved_name = load_from_page
-            st.toast(f"'{load_from_page}' 불러오기 완료")
+            st.session_state.selected_saved_name = name
+            st.toast(f"'{name}' 불러오기 완료")
         except Exception as e:
             st.error(f"불러오기 실패: {e}")
 
@@ -494,8 +578,13 @@ def run_streamlit_app() -> None:
         ].copy()
         missing_codes = set(selected_codes) - set(filtered["CODE"].astype(str))
         if missing_codes:
-            missing_df = df[df["CODE"].astype(str).isin(missing_codes)].copy()
-            missing_df = missing_df[["CODE", "NM"]].copy()
+            code_col = entity_cfg["code_col"]
+            name_col = entity_cfg["name_col"]
+            df_code = "CODE" if "CODE" in df.columns else code_col
+            df_name = "NM" if "NM" in df.columns else name_col
+            missing_df = df[df[df_code].astype(str).isin(missing_codes)].copy()
+            missing_df = missing_df[[df_code, df_name]].copy()
+            missing_df = missing_df.rename(columns={df_code: "CODE", df_name: "NM"})
             missing_df["추천포함"] = False
             missing_df["판단근거"] = "필터범위외"
             result_df = pd.concat([in_filtered, missing_df], ignore_index=True)
@@ -534,6 +623,7 @@ def run_streamlit_app() -> None:
                     name=save_name,
                     description=save_description,
                     codes=result_df["CODE"].astype(str).tolist(),
+                    entity_type=entity_type,
                 )
                 refresh_saved_selection_state()
                 st.session_state.selected_saved_name = save_name
@@ -541,7 +631,7 @@ def run_streamlit_app() -> None:
                 st.rerun()
 
         st.markdown("### 저장 결과 불러오기")
-        saved_items = load_saved_selection_sets()
+        saved_items = load_saved_selection_sets(entity_type=entity_type)
         saved_names = [item.get("name", "") for item in saved_items]
 
         if saved_names:

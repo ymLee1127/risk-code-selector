@@ -56,6 +56,25 @@ def load_risk_codes_from_db(
     return df
 
 
+def load_from_table(table: str, columns: list[str] | None = None) -> pd.DataFrame:
+    """
+    테이블에서 데이터 로드. columns 미지정 시 * (전체).
+    """
+    from sqlalchemy import text
+
+    for name, val in [("table", table)]:
+        if not val.replace("_", "").isalnum():
+            raise ValueError(f"잘못된 {name}: {val}")
+
+    engine = get_connection()
+    if columns:
+        cols_str = ", ".join(f'"{c}"' for c in columns)
+        query = text(f'SELECT {cols_str} FROM "{table}"')
+    else:
+        query = text(f'SELECT * FROM "{table}"')
+    return pd.read_sql(query, engine)
+
+
 def import_risk_codes_to_db(
     df: pd.DataFrame,
     table: Optional[str] = None,
@@ -95,6 +114,77 @@ def import_risk_codes_to_db(
             result = conn.execute(
                 text(f'INSERT OR IGNORE INTO "{table}" (CODE, NM) VALUES (:code, :nm)'),
                 {"code": str(row["CODE"])[:50], "nm": str(row["NM"])[:500]},
+            )
+            if result.rowcount and result.rowcount > 0:
+                inserted += 1
+        conn.commit()
+
+    return inserted, f"{inserted}건 반영 완료 (총 {len(df_clean)}건 중)"
+
+
+def import_entity_to_db(
+    entity_type: str,
+    df: pd.DataFrame,
+    mode: str = "replace",
+) -> tuple[int, str]:
+    """
+    엔티티 타입별 DB 반영.
+    위험률: CODE, NM → risk_code_master
+    상품: display_cols → product_master
+    담보: display_cols → coverage_master
+    """
+    from config.entity_types import get_entity_config
+
+    config = get_entity_config(entity_type)
+    table = config.get("table", "risk_code_master")
+    code_col = config["code_col"]
+    required_cols = config.get("required_cols", {code_col})
+
+    if entity_type == "위험률":
+        if "CODE" not in df.columns or "NM" not in df.columns:
+            raise ValueError("위험률은 CODE, NM 컬럼이 필요합니다.")
+        return import_risk_codes_to_db(df, table=table, mode=mode)
+
+    # 상품/담보: display_cols 매칭
+    display_cols = config.get("display_cols", [])
+    missing = required_cols - set(df.columns)
+    if missing:
+        raise ValueError(f"필수 컬럼 누락: {', '.join(sorted(missing))}")
+
+    df_clean = df.copy()
+    for col in display_cols:
+        if col not in df_clean.columns:
+            df_clean[col] = ""
+    df_clean = df_clean[[c for c in display_cols if c in df_clean.columns]]
+    df_clean = df_clean.dropna(subset=[code_col]).astype(str)
+    df_clean = df_clean.drop_duplicates(subset=[code_col], keep="first")
+
+    from sqlalchemy import text
+
+    engine = get_connection()
+    cols = list(df_clean.columns)
+    cols_str = ", ".join(f'"{c}"' for c in cols)
+    placeholders = ", ".join(f":{c}" for c in cols)
+
+    with engine.connect() as conn:
+        if mode == "replace":
+            conn.execute(text(f'DROP TABLE IF EXISTS "{table}"'))
+            conn.commit()
+
+        # 동적 컬럼으로 테이블 생성
+        col_defs = ", ".join(f'"{c}" VARCHAR(500)' for c in cols)
+        pk_def = f'PRIMARY KEY ("{code_col}")'
+        conn.execute(
+            text(f'CREATE TABLE IF NOT EXISTS "{table}" ({col_defs}, {pk_def})')
+        )
+        conn.commit()
+
+        inserted = 0
+        for _, row in df_clean.iterrows():
+            params = {c: str(row[c])[:500] for c in cols}
+            result = conn.execute(
+                text(f'INSERT OR IGNORE INTO "{table}" ({cols_str}) VALUES ({placeholders})'),
+                params,
             )
             if result.rowcount and result.rowcount > 0:
                 inserted += 1
